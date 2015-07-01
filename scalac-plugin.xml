@@ -1,0 +1,4 @@
+<plugin>
+  <name>HyperfluxPlugin</name>
+  <classname>hyperflux.plugin.HyperfluxPlugin</classname>
+</plugin>
