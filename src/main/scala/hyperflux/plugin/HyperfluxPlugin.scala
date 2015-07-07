@@ -7,14 +7,14 @@ class HyperfluxPlugin(val global: Global) extends Plugin {
   import global._
 
   val name = "hyperflux"
-  val description = "Creates client-server-structure"
+  val description = "Creates client-server structure"
   val components = List[PluginComponent](
-    HyperfluxComponent
+    HyperfluxAnalyzerComponent
   )
 
-  object HyperfluxComponent extends {
+  object HyperfluxAnalyzerComponent extends {
     val global: HyperfluxPlugin.this.global.type = HyperfluxPlugin.this.global
     override val runsAfter = List("typer")
     override val runsBefore = List("jsinterop")
-  } with HyperfluxComponent
+  } with HyperfluxAnalyzerComponent
 }
