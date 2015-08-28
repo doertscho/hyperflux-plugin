@@ -11,7 +11,7 @@ abstract class HyperfluxUsageAnalyzerComponent extends PluginComponent {
 
   val phaseName = "hf-u-analyzer"
   
-  val hf: HyperfluxStorage[Symbol, Template, DefDef, RefTree, Tree]
+  val hf: HyperfluxStorage[Symbol, DefDef, RefTree, Tree]
 
   override def newPhase(prev: nsc.Phase): StdPhase =
     new HyperfluxUsageAnalyzerPhase(prev)

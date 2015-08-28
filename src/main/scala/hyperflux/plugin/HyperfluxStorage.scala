@@ -9,11 +9,11 @@ import scala.collection.mutable.HashSet
  * and transformations made be previous phases.
  * 
  * In this case, S is supposed to represent the symbol type,
- * Te is for Template, D for DefDef, R for RefTree and Tr for Tree.
+ * D is for DefDef, R for RefTree and T for Tree.
  * They have to be passed as parameters, however, due to complex
  * cross-linkings in the levels above.
  */
-class HyperfluxStorage[S, Te, D, R, Tr] {
+class HyperfluxStorage[S, D, R, T] {
 
   /**
    * which package definitions exist in the current run?
@@ -50,10 +50,10 @@ class HyperfluxStorage[S, Te, D, R, Tr] {
   /**
    * which proxy methods have been created for this run?
    * for each client component (S), there is a set of proxy methods, case
-   * classes and case objects (Tr) that are required for the methods of this
+   * classes and case objects (T) that are required for the methods of this
    * component
    */
-  val proxyDefs = new HashMap[S, HashSet[Tr]]
+  val proxyDefs = new HashMap[S, HashSet[T]]
   
   /**
    * which proxy methods tunnel to which server objects?

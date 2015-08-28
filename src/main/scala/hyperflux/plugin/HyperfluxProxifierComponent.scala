@@ -22,7 +22,13 @@ abstract class HyperfluxProxifierComponent
   override def newPhase(prev: nsc.Phase): StdPhase =
       new HyperfluxProxifierPhase(prev)
   
-  val hf: HyperfluxStorage[Symbol, Template, DefDef, RefTree, Tree]
+  val hf: HyperfluxStorage[Symbol, DefDef, RefTree, Tree]
+  
+  def browseTree(t: Tree) {
+    val tcu = new CompilationUnit(NoSourceFile)
+    tcu.body = t
+    treeBrowser.browse("tree", tcu :: Nil)
+  }
   
   class HyperfluxProxyTransformer(unit: CompilationUnit)
       extends global.Transformer {
@@ -101,16 +107,7 @@ abstract class HyperfluxProxifierComponent
           case ExistentialTypeTree(tpt, wheres) =>
             new ExistentialTypeTree(rt(tpt), rts(wheres))
           case tt @ TypeTree() => {
-            var typeName = tt.tpe.toString()
-            if (typeName startsWith "scala.this.") {
-              typeName = typeName substring 11
-            }
-            if (typeName contains '.') {
-              // TODO: this is not correct, a select chain needs to be created here
-              new Ident(newTypeName(typeName))
-            } else {
-              new Ident(newTypeName(typeName))
-            }
+            TypeTree(tt.tpe)
           }
           // SymTree types:
           case Select(qual, name) => new Select(rt(qual), name)
@@ -192,7 +189,7 @@ abstract class HyperfluxProxifierComponent
   class HyperfluxProxifierPhase(prev: nsc.Phase) extends Phase(prev) {
     override def name = phaseName
     override def description =
-      "rewrites from client to server"
+      "rewrites calls from client to server"
     
     override def run() {
       
@@ -227,7 +224,7 @@ abstract class HyperfluxProxifierComponent
         // run typer phase
         val proxTyper = analyzer.typerFactory.newPhase(proxPOer)
         proxTyper(proxyUnit)
-        treeBrowser.browse("proxy-typer", proxyUnit :: Nil)
+        //treeBrowser.browse("proxy-typer", proxyUnit :: Nil)
         
         // extract proxy methods
         proxyUnit.body match {
@@ -237,13 +234,6 @@ abstract class HyperfluxProxifierComponent
                 // the proxy method definitions need not only be remembered for
                 // later addition but also associated to the right server method
                 val proxObjName = t.symbol.name.toString()
-                /*var proxObjName = ""
-                t match {
-                  case DefDef(_, name, _, _, _, _) => proxObjName = name.toString()
-                  case ClassDef(_, name, _, _) => proxObjName = name.toString()
-                  case ModuleDef(_, name, _) => proxObjName = name.toString()
-                  case _ =>
-                }*/
                 var usingClientObjects: List[Symbol] = Nil
                 val matchingPair = hf.methodUsages.values.flatten find {
                   case (objSym, methSym) => {
@@ -268,8 +258,8 @@ abstract class HyperfluxProxifierComponent
                 t match {
                   case d @ DefDef(_, name, _, _, _, _) =>
                     usingClientObjects foreach { co =>
-                      copyToClientDefList(co, d)
-                      hf.proxyAliases(co) += ((matchingPair, t.symbol))
+                      val newSym = copyToClientDefList(co, d)
+                      hf.proxyAliases(co) += ((matchingPair, newSym))
                     }
                 
                   // the data carrier case classes only need to be remembered
@@ -295,16 +285,17 @@ abstract class HyperfluxProxifierComponent
       // at this point, a proxy method has been created and compiled for every
       // server method used, and for every client component, an alias table
       // has been created. we can now start rewriting the client components.
-            
+                  
       // apply transformations from HFProxyTransformer
       super.run()
     }
     
     /**
      * copies a proxy method or class definition to the dictionary of a client
-     * component, rewriting symbol ownerships accordingly
+     * component, rewriting symbol ownerships accordingly, and returns the new
+     * symbol
      */
-    def copyToClientDefList(co: Symbol, proxyDef: Tree) {
+    def copyToClientDefList(co: Symbol, proxyDef: Tree): Symbol = {
       val proxyObjSym = proxyDef.symbol.owner;
       
       def cc[T <: Tree](tree: T): T = {
@@ -319,7 +310,10 @@ abstract class HyperfluxProxifierComponent
           case Assign(lhs, rhs) => new Assign(cc(lhs), cc(rhs))
           case AssignOrNamedArg(lhs, rhs) => new AssignOrNamedArg(cc(lhs), cc(rhs))
           case If(cond, thenp, elsep) => new If(cc(cond), cc(thenp), cc(elsep))
-          case Match(sel, cases) => new Match(cc(sel), ccs(cases))
+          case Match(sel, cases) => {
+            println("____________ match expr, sel = " + sel)
+            new Match(cc(sel), ccs(cases))
+          }
           case Try(block, catches, finalizer) =>
             new Try(cc(block), ccs(catches), cc(finalizer))
           case Throw(expr) => new Throw(cc(expr))
@@ -340,15 +334,15 @@ abstract class HyperfluxProxifierComponent
           case ExistentialTypeTree(tpt, wheres) =>
             new ExistentialTypeTree(cc(tpt), ccs(wheres))
           case tt @ TypeTree() => {
-            var typeName = tt.tpe.toString()
-            if (typeName startsWith "scala.this.") {
-              typeName = typeName substring 11
-            }
-            if (typeName contains '.') {
-              // TODO: this is not correct, a select chain needs to be created here
-              new Ident(newTypeName(typeName))
+            if (tt.tpe.toString() startsWith "PROXY__") { 
+              val newType = tt.tpe map { t =>
+                if (t.toString() startsWith "PROXY__") {
+                  co.thisType
+                } else t
+              }
+              TypeTree(newType)
             } else {
-              new Ident(newTypeName(typeName))
+              TypeTree(tt.tpe)
             }
           }
           // SymTree types:
@@ -410,12 +404,29 @@ abstract class HyperfluxProxifierComponent
           if (tree.symbol.safeOwner == proxyObjSym) {
             rw.symbol.owner = co
           }
+          
+          // TODO: see below, does this have to be done on both levels?
+          if (rw.symbol.info.toString() startsWith "PROXY__") {
+            val newType = rw.symbol.info map { t =>
+              if (t.toString() startsWith "PROXY__") {
+                co.thisType
+              } else t
+            }
+            rw.symbol.info = newType
+          }
         }
         
         // copy type, adjust ownership where necessary
-        // TODO: this is probably not the most elegant test
+        // TODO: this is probably not the most elegant test ..
         if (tree.tpe.toString() startsWith "PROXY__") { 
-          // TODO
+          // TODO: y not? ;_;
+          val newType = tree.tpe map { t =>
+            if (t.toString() startsWith "PROXY__") {
+              co.thisType
+            } else t
+          }
+          rw setType newType
+          //println("____________ changed " + tree.tpe + " to " + newType + " on " + rw)
         } else {
           rw setType tree.tpe
         }
@@ -424,7 +435,11 @@ abstract class HyperfluxProxifierComponent
       }
       def ccs[T <: Tree](trees: List[T]): List[T] = trees map cc
       
-      hf.proxyDefs(co) += cc(proxyDef)
+      val adjusted = cc(proxyDef)
+      hf.proxyDefs(co) += adjusted
+      println("___ " + adjusted.symbol + " has type " + adjusted.tpe)
+      println("___ symbol type is " + adjusted.symbol.info)
+      adjusted.symbol
     }
     
     // some constant names that will be used in every proxy method
@@ -650,7 +665,7 @@ abstract class HyperfluxProxifierComponent
       case ExistentialTypeTree(tpt, wheres) =>
         new ExistentialTypeTree(ct(tpt), cts(wheres))
       case tt @ TypeTree() => {
-        var typeName = tt.tpe.toString()
+        /*var typeName = tt.tpe.toString()
         if (typeName startsWith "scala.this.") {
           typeName = typeName substring 11
         }
@@ -659,7 +674,8 @@ abstract class HyperfluxProxifierComponent
           new Ident(newTypeName(typeName))
         } else {
           new Ident(newTypeName(typeName))
-        }
+        }*/
+        TypeTree(tt.tpe)
       }
       // SymTree types:
       case Select(qual, name) => new Select(ct(qual), name)

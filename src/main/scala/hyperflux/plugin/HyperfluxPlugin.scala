@@ -11,8 +11,8 @@ class HyperfluxPlugin(val global: Global) extends Plugin {
   val description = "Creates client-server structure"
 
   // some storage objects that are used across the phases
-  val hf: HyperfluxStorage[Symbol, Template, DefDef, RefTree, Tree] = 
-    new HyperfluxStorage[Symbol, Template, DefDef, RefTree, Tree]
+  val hf: HyperfluxStorage[Symbol, DefDef, RefTree, Tree] = 
+    new HyperfluxStorage[Symbol, DefDef, RefTree, Tree]
   
   val components = List[PluginComponent](
     HyperfluxInterfaceAnalyzerComponent,
