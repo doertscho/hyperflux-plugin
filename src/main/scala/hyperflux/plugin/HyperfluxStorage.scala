@@ -49,11 +49,11 @@ class HyperfluxStorage[S, D, R, T] {
   
   /**
    * which proxy methods have been created for this run?
-   * for each client component (S), there is a set of proxy methods, case
+   * [-for each client component (S),-] there is a set of proxy methods, case
    * classes and case objects (T) that are required for the methods of this
    * component
    */
-  val proxyDefs = new HashMap[S, HashSet[T]]
+  val proxyDefs = new HashSet[T] // before: new HashMap[S, HashSet[T]]
   
   /**
    * which proxy methods tunnel to which server objects?

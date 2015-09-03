@@ -29,9 +29,25 @@ abstract class HyperfluxProxifierComponent
     tcu.body = t
     treeBrowser.browse("tree", tcu :: Nil)
   }
+    
+  def createProxyObjectName(objSym: Symbol): String =
+    "PROXY__" + objSym.name.toString().replace('.', '_')
+      
+  def createProxyMethodName(objSym: Symbol, methSym: Symbol): String = {
+    val objName = objSym.name.toString().replace('.', '_')
+    val methName = methSym.name.toString().replace('.', '_')
+    "PROXY__" + objName + "_" + methName
+  }
   
   class HyperfluxProxyTransformer(unit: CompilationUnit)
       extends global.Transformer {
+    
+    override def transformUnit(unit: CompilationUnit) {
+      super.transformUnit(unit)
+      
+      val uNamer = analyzer.namerFactory.newPhase(NoPhase)
+      uNamer(unit)
+    }
     
     override def transform(tree: Tree): Tree = {
       var rw = tree
@@ -80,7 +96,7 @@ abstract class HyperfluxProxifierComponent
           
           // the essential part happens here:
           case Apply(fun, args) => {
-            if (hf.serverObjects contains fun.symbol.safeOwner) {
+            /*if (hf.serverObjects contains fun.symbol.safeOwner) {
               // rewrite this call to make it a call to the proxy function
               val proxSym = hf.proxyAliases(cSym)(fun.symbol.owner, fun.symbol)
               val proxMethod = new Select(
@@ -88,9 +104,9 @@ abstract class HyperfluxProxifierComponent
                   proxSym.name
               )
               new Apply(proxMethod, rts(args))
-            } else {
+            } else {*/
               new Apply(rt(fun), rts(args))
-            }
+            //}
           }
           // *******************
           
@@ -172,122 +188,22 @@ abstract class HyperfluxProxifierComponent
       }
       def rts[T <: Tree](ts: List[T]): List[T] = ts map rt
       
+      val adjustedProxyDefs = hf.proxyDefs /*filter { t => 
+        val proxObjName = t.symbol.name.toString()
+        hf.methodUsages(cSym) find {
+          case (objSym, methSym) => 
+            proxObjName startsWith createProxyMethodName(objSym, methSym)
+        } isDefined
+      } map adjust(cSym) _ */
+      
       val tOut = new Template(
           tIn.parents, 
           tIn.self, 
-          rts(tIn.body) ++ hf.proxyDefs(cSym)
+          rts(tIn.body) ++ adjustedProxyDefs
       )
       tOut.symbol = tIn.symbol
       tOut.pos = tIn.pos
       tOut
-    }
-  }
-  
-  override def newTransformer(unit: CompilationUnit): global.Transformer =
-    new HyperfluxProxyTransformer(unit)
-
-  class HyperfluxProxifierPhase(prev: nsc.Phase) extends Phase(prev) {
-    override def name = phaseName
-    override def description =
-      "rewrites calls from client to server"
-    
-    override def run() {
-      
-      // at this point, we have identified the server objects and the methods
-      // they provide, and we have determined which of them are actually used
-      // by which client components. we now want to create a suitable proxy
-      // method for each of those usages.
-      
-      // initialize dictionaries
-      hf.clientObjects.foreach { sym =>
-        hf.proxyDefs += ((sym, new HashSet[Tree]))
-        hf.proxyAliases += ((sym, new HashMap[(Symbol, Symbol), Symbol]))
-      }
-      
-      hf.packageIDs foreach { case (pSym, pid) =>
-        // create a new compilation unit for the proxy methods
-        val proxyUnit = new CompilationUnit(NoSourceFile)
-        proxyUnit.body = buildProxyTree(pSym, pid)
-        
-        //treeBrowser.browse("proxy-pre-compile", proxyUnit :: Nil)
-        
-        // run namer phase
-        val proxNamer = analyzer.namerFactory.newPhase(NoPhase)
-        proxNamer(proxyUnit)
-        //treeBrowser.browse("proxy-namer", proxyUnit :: Nil)
-        
-        // run package objects phase
-        val proxPOer = analyzer.packageObjects.newPhase(proxNamer)
-        proxPOer(proxyUnit)
-        //treeBrowser.browse("proxy-po", proxyUnit :: Nil)
-        
-        // run typer phase
-        val proxTyper = analyzer.typerFactory.newPhase(proxPOer)
-        proxTyper(proxyUnit)
-        //treeBrowser.browse("proxy-typer", proxyUnit :: Nil)
-        
-        // extract proxy methods
-        proxyUnit.body match {
-          case PackageDef(_, stats) => stats foreach {
-            case m @ ModuleDef(_, _, impl) => {  
-              impl.body foreach { t =>
-                // the proxy method definitions need not only be remembered for
-                // later addition but also associated to the right server method
-                val proxObjName = t.symbol.name.toString()
-                var usingClientObjects: List[Symbol] = Nil
-                val matchingPair = hf.methodUsages.values.flatten find {
-                  case (objSym, methSym) => {
-                    proxObjName startsWith
-                      createProxyMethodName(objSym, methSym)
-                  }
-                } match {
-                  case Some(pair) => {
-                    println("pair " + pair + " matches " + proxObjName)
-                    usingClientObjects = (hf.methodUsages.keys filter {
-                      sym => hf.methodUsages(sym) contains pair
-                    }).toList
-                    pair
-                  }
-                  case None => {
-                    println("no pair matches " + proxObjName)
-                    warning("proxy creator created an unused method")
-                    (null, null)
-                  }
-                }
-                
-                t match {
-                  case d @ DefDef(_, name, _, _, _, _) =>
-                    usingClientObjects foreach { co =>
-                      val newSym = copyToClientDefList(co, d)
-                      hf.proxyAliases(co) += ((matchingPair, newSym))
-                    }
-                
-                  // the data carrier case classes only need to be remembered
-                  case c @ ClassDef(_, _, _, _) =>
-                    usingClientObjects foreach { co =>
-                      copyToClientDefList(co, c)
-                    }
-                  case m @ ModuleDef(_, _, _) =>
-                    usingClientObjects foreach { co =>
-                      copyToClientDefList(co, m)
-                    }
-                  case x @ _ => warning(
-                      "the proxy creator created something strange: " + x)
-                }
-              }
-            }
-            // imports can be skipped
-            case _ =>
-          }
-        }
-      }
-      
-      // at this point, a proxy method has been created and compiled for every
-      // server method used, and for every client component, an alias table
-      // has been created. we can now start rewriting the client components.
-                  
-      // apply transformations from HFProxyTransformer
-      super.run()
     }
     
     /**
@@ -295,8 +211,9 @@ abstract class HyperfluxProxifierComponent
      * component, rewriting symbol ownerships accordingly, and returns the new
      * symbol
      */
-    def copyToClientDefList(co: Symbol, proxyDef: Tree): Symbol = {
+    def adjust(co: Symbol)(proxyDef: Tree): Tree = {
       val proxyObjSym = proxyDef.symbol.owner;
+      val namer = analyzer.newNamer(analyzer.rootContext(unit))
       
       def cc[T <: Tree](tree: T): T = {
         val rw = (tree match {
@@ -351,15 +268,29 @@ abstract class HyperfluxProxifierComponent
           case SelectFromTypeTree(qual, name) =>
             new SelectFromTypeTree(cc(qual), name)
           case PackageDef(pid, stats) => new PackageDef(cc(pid), ccs(stats))
-          case ClassDef(Modifiers(flags, pw, ann), name, tparams, impl) =>
-            new ClassDef(
+          case cd @ ClassDef(
+              Modifiers(flags, pw, ann), name, tparams, impl) => {
+            val newClass = new ClassDef(
                 new Modifiers(flags, pw, ccs(ann)),
                 name,
                 ccs(tparams),
                 cc(impl)
             )
-          case ModuleDef(Modifiers(flags, pw, ann), name, impl) =>
-            new ModuleDef(new Modifiers(flags, pw, ccs(ann)), name, cc(impl))
+            newClass setSymbol
+              co.newClassSymbol(cd.name.toTypeName, cd.pos, flags)
+            newClass.symbol setInfo namer.completerOf(newClass)
+            newClass
+          }
+          case md @ ModuleDef(Modifiers(flags, pw, ann), name, impl) => {
+            val newMod = new ModuleDef(
+                new Modifiers(flags, pw, ccs(ann)), name, cc(impl))
+            newMod setSymbol
+              co.newModule(md.name.toTermName, md.pos, flags)
+            newMod.symbol.moduleClass setInfo
+              namer.namerOf(newMod.symbol).moduleClassTypeCompleter(newMod)
+            newMod.symbol setInfo namer.completerOf(newMod)
+            newMod
+          }
           case ValDef(Modifiers(flags, pw, ann), name, tpt, rhs) =>
             new ValDef(
                 new Modifiers(flags, pw, ccs(ann)),
@@ -367,8 +298,9 @@ abstract class HyperfluxProxifierComponent
                 cc(tpt),
                 cc(rhs)
             )
-          case DefDef(Modifiers(flags, pw, ann), name, tps, vpss, tpt, rhs) =>
-            new DefDef(
+          case dd @ DefDef(
+              Modifiers(flags, pw, ann), name, tps, vpss, tpt, rhs) => {
+            val newDef = new DefDef(
                 new Modifiers(flags, pw, ccs(ann)),
                 name,
                 ccs(tps),
@@ -376,6 +308,14 @@ abstract class HyperfluxProxifierComponent
                 cc(tpt),
                 cc(rhs)
             )
+            newDef setSymbol co.newMethod(dd.name.toTermName, dd.pos, flags)
+            if (newDef.name == nme.copy) {
+              namer.enterCopyMethod(newDef)
+            } else {
+              newDef.symbol setInfo namer.completerOf(newDef)
+            }
+            newDef
+          }
           case TypeDef(Modifiers(flags, pw, ann), name, tps, rhs) =>
             new TypeDef(
                 new Modifiers(flags, pw, ccs(ann)),
@@ -398,13 +338,15 @@ abstract class HyperfluxProxifierComponent
           case Annotated(ann, arg) => new Annotated(cc(ann), cc(arg))
         }).asInstanceOf[T]
         
+        /*
         // copy symbol, change to client module where necessary
         if (tree.hasSymbolField) {
-          rw.symbol = tree.symbol
           if (tree.symbol.safeOwner == proxyObjSym) {
-            rw.symbol.owner = co
+            rw setSymbol co.newClassSymbol(tree, pos, newFlags)
+          } else {
+            rw setSymbol tree.symbol
           }
-          
+          /*
           // TODO: see below, does this have to be done on both levels?
           if (rw.symbol.info.toString() startsWith "PROXY__") {
             val newType = rw.symbol.info map { t =>
@@ -412,10 +354,10 @@ abstract class HyperfluxProxifierComponent
                 co.thisType
               } else t
             }
-            rw.symbol.info = newType
-          }
-        }
-        
+            rw.symbol setInfo newType
+          }*/
+        }*/
+        /*
         // copy type, adjust ownership where necessary
         // TODO: this is probably not the most elegant test ..
         if (tree.tpe.toString() startsWith "PROXY__") { 
@@ -429,17 +371,94 @@ abstract class HyperfluxProxifierComponent
           //println("____________ changed " + tree.tpe + " to " + newType + " on " + rw)
         } else {
           rw setType tree.tpe
-        }
+        }*/
         
         rw
       }
+      
       def ccs[T <: Tree](trees: List[T]): List[T] = trees map cc
       
-      val adjusted = cc(proxyDef)
-      hf.proxyDefs(co) += adjusted
-      println("___ " + adjusted.symbol + " has type " + adjusted.tpe)
-      println("___ symbol type is " + adjusted.symbol.info)
-      adjusted.symbol
+      val adjustedDef = cc(proxyDef)
+      adjustedDef match {
+        case d: DefDef => {
+          val proxObjName = proxyDef.symbol.name.toString()
+          val matchingPair = (hf.methodUsages(co) find {
+            case (objSym, methSym) => 
+              proxObjName startsWith createProxyMethodName(objSym, methSym)
+          } match {
+            case Some(pair) => pair
+            case None => {
+              warning("trying to adjust unused method: " + proxObjName)
+              (NoSymbol, NoSymbol)
+            }
+          })
+          hf.proxyAliases(co) += ((matchingPair, d.symbol))
+        }
+        case _ =>
+      }
+      
+      adjustedDef
+    }
+  }
+  
+  override def newTransformer(unit: CompilationUnit): global.Transformer =
+    new HyperfluxProxyTransformer(unit)
+
+  class HyperfluxProxifierPhase(prev: nsc.Phase) extends Phase(prev) {
+    override def name = phaseName
+    override def description =
+      "rewrites calls from client to server"
+    
+    override def run() {
+      
+      // at this point, we have identified the server objects and the methods
+      // they provide, and we have determined which of them are actually used
+      // by which client components. we now want to create a suitable proxy
+      // method for each of those usages.
+      
+      // initialize dictionaries
+      hf.clientObjects.foreach { sym =>
+        hf.proxyAliases += ((sym, new HashMap[(Symbol, Symbol), Symbol]))
+      }
+      
+      hf.packageIDs foreach { case (pSym, pid) =>
+        // create a new compilation unit for the proxy methods
+        val proxyUnit = new CompilationUnit(NoSourceFile)
+        proxyUnit.body = buildProxyTree(pSym, pid)
+        
+        //treeBrowser.browse("proxy-pre-compile", proxyUnit :: Nil)
+        
+        // run namer phase
+        val proxNamer = analyzer.namerFactory.newPhase(NoPhase)
+        //proxNamer(proxyUnit)
+        //treeBrowser.browse("proxy-namer", proxyUnit :: Nil)
+        
+        // run package objects phase
+        val proxPOer = analyzer.packageObjects.newPhase(proxNamer)
+        //proxPOer(proxyUnit)
+        //treeBrowser.browse("proxy-po", proxyUnit :: Nil)
+        
+        // run typer phase
+        val proxTyper = analyzer.typerFactory.newPhase(proxPOer)
+        //proxTyper(proxyUnit)
+        //treeBrowser.browse("proxy-typer", proxyUnit :: Nil)
+        
+        // extract proxy methods
+        proxyUnit.body match {
+          case PackageDef(_, stats) => stats foreach {
+            case m @ ModuleDef(_, _, impl) => hf.proxyDefs ++= impl.body
+            // imports can be skipped
+            case _ =>
+          }
+        }
+      }
+      
+      // at this point, a proxy method has been created and compiled for every
+      // server method used, and for every client component, an alias table
+      // has been created. we can now start rewriting the client components.
+                  
+      // apply transformations from HFProxyTransformer
+      super.run()
     }
     
     // some constant names that will be used in every proxy method
@@ -619,15 +638,6 @@ abstract class HyperfluxProxifierComponent
         }
       }
       new PackageDef(pid, pBody.toList)
-    }
-    
-    def createProxyObjectName(objSym: Symbol): String =
-      "PROXY__" + objSym.name.toString().replace('.', '_')
-        
-    def createProxyMethodName(objSym: Symbol, methSym: Symbol): String = {
-      val objName = objSym.name.toString().replace('.', '_')
-      val methName = methSym.name.toString().replace('.', '_')
-      "PROXY__" + objName + "_" + methName
     }
     
     /**
