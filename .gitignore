@@ -6,6 +6,8 @@ lib/
 *.sh
 project/project/
 project/target/
+backup/
+todo.txt
 
 #### joe ignores
 #### joe made this: http://goel.io/joe

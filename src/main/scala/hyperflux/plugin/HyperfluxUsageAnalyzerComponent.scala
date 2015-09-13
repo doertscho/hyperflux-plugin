@@ -3,7 +3,9 @@ package hyperflux.plugin
 import scala.tools.nsc
 import scala.tools.nsc._
 import scala.tools.nsc.plugins._
+import hyperflux.annotation._
 import scala.collection.mutable.HashSet
+import scala.reflect.internal.Flags._
 
 abstract class HyperfluxUsageAnalyzerComponent extends PluginComponent {
 
@@ -11,7 +13,7 @@ abstract class HyperfluxUsageAnalyzerComponent extends PluginComponent {
 
   val phaseName = "hf-u-analyzer"
   
-  val hf: HyperfluxStorage[Symbol, DefDef, RefTree, Tree]
+  val hf: HyperfluxStorage[TermName, ValDef, Tree]
 
   override def newPhase(prev: nsc.Phase): StdPhase =
     new HyperfluxUsageAnalyzerPhase(prev)
@@ -25,49 +27,85 @@ abstract class HyperfluxUsageAnalyzerComponent extends PluginComponent {
       findUsages(unit.body)
     }
     
-    def findUsages(tree: Tree) {
-      tree match {
-        case PackageDef(_, stats) =>
-          stats foreach findUsages
-        case ModuleDef(mods, name, impl) 
-        if (hf.clientObjects contains impl.symbol.safeOwner) =>
-          analyzeClientComponent(impl)
-        // change nothing on anything else on this level
-        case _ =>
-      }
+    def findUsages(t: Tree): Unit = t match {
+      case PackageDef(_, stats) => stats foreach findUsages
+      case ModuleDef(_, oName, impl)
+      if (hf.clientObjects contains oName) =>
+        analyzeClientObject(oName, impl.body)
+      case _ =>
     }
     
-    def analyzeClientComponent(impl: Template) {
-      val compSym = impl.symbol.safeOwner
-      hf.methodUsages += ((compSym, new HashSet[(Symbol, Symbol)]))
+    def analyzeClientObject(coName: TermName, ts: List[Tree]) {
+      hf.methodUsages += ((coName, new HashSet[(TermName, TermName)]))
+      ts foreach acc
       
-      def accInt(tree: Tree) {
-        tree match {
-          // an actual method call
-          case Apply(fun, args) => {
-            if (hf.serverObjects contains fun.symbol.safeOwner) {
-              // TODO: at this point, it should not happen that the called
-              // server method is not defined or private, because otherwise
-              // the compiler would have complained in an earlier phase.
-              // however, this should be tested
-              hf.methodUsages(compSym) += ((fun.symbol.safeOwner, fun.symbol))
-            }
-            args foreach accInt
+      def acc(t: Tree): Unit = t match {
+        // TermTree types:
+        case Block(es, e) => { accs(es) ; acc(e) }
+        case Alternative(ts) => accs(ts)
+        case Star(e) => acc(e)
+        case UnApply(f, as) => { acc(f) ; accs(as) }
+        case ArrayValue(t, es) => { acc(t) ; accs(es) }
+        case Assign(l, r) => { acc(l) ; acc(r) }
+        case AssignOrNamedArg(l, r) => { acc(l) ; acc(r) }
+        case If(c, t, e) => { acc(c) ; acc(t) ; acc(e) }
+        case Match(s, cs) => { acc(s) ; accs(cs) }
+        case Try(b, cs, f) => { acc(b) ; accs(cs) ; acc(f) }
+        case Throw(e) => acc(e)
+        case New(t) => acc(t)
+        case Typed(e, t) => { acc(e) ; acc(t) }
+        case TypeApply(f, as) => { acc(f) ; accs(as) }
+        
+        /*
+         * the interesting part:
+         */
+        case Apply(f, as) => {
+          f match {
+            case Select(Ident(oName), mName)
+            if (
+              (hf.serverObjects contains oName.toTermName) &&
+              (hf.serverMethods(oName.toTermName) contains mName.toTermName)
+            ) =>
+              hf.methodUsages(coName) += ((oName.toTermName, mName.toTermName))
+            case _ =>
           }
-          case Select(qualifier, _) => accInt(qualifier)
-          case DefDef(_, _, _, _, _, rhs) => accInt(rhs)
-          case Block(stats, expr) => { stats foreach accInt ; accInt(expr) }
-          case ValDef(_, _, _, rhs) => accInt(rhs)
-          case If(cond, thenp, elsep) => {
-            accInt(cond)
-            accInt(thenp)
-            accInt(elsep)
-          }
-          // TODO: add further cases
-          case _ =>
+          acc(f)
+          accs(as)
         }
+        
+        case Super(q, m) => acc(q)
+        case _: ReferenceToBoxed =>
+        case _: Literal =>
+        case EmptyTree =>
+        // TypTree types:
+        case SingletonTypeTree(r) => acc(r)
+        case CompoundTypeTree(t) => acc(t)
+        case AppliedTypeTree(t, as) => { acc(t) ; accs(as) }
+        case TypeBoundsTree(l, h) => { acc(l) ; acc(h) }
+        case ExistentialTypeTree(_, ws) => accs(ws)
+        case _: TypeTree =>
+        // SymTree types:
+        case Select(q, n) => acc(q)
+        case _: Ident =>
+        case SelectFromTypeTree(q, _) => acc(q)
+        case _: PackageDef => // should not occur
+        case ClassDef(_, _, _, i) => acc(i)
+        case ModuleDef(_, _, i) => acc(i)
+        case ValDef(_, _, _, r) => acc(r)
+        case DefDef(_, _, _, _, _, r) => acc(r)
+        case TypeDef(_, _, _, r) => acc(r)
+        case LabelDef(_, _, r) => acc(r)
+        case Bind(_, b) => acc(b)
+        case _: Import =>
+        case Template(_, _, b) => accs(b)
+        case Function(_, b) => acc(b)
+        case Return(e) => acc(e)
+        case ApplyDynamic(q, as) => { acc(q) ; accs(as) }
+        case _: This => 
+        case CaseDef(p, g, b) => { acc(p) ; acc(g) ; acc(b) }
+        case Annotated(an, ar) => { acc(an) ; acc(ar) }
       }
-      impl.children foreach accInt
+      def accs(ts: List[Tree]) = ts foreach acc
     }
   }
 }

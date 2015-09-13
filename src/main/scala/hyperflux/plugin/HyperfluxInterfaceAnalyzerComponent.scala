@@ -13,7 +13,7 @@ abstract class HyperfluxInterfaceAnalyzerComponent extends PluginComponent {
 
   val phaseName = "hf-i-analyzer"
   
-  val hf: HyperfluxStorage[Symbol, DefDef, RefTree, Tree]
+  val hf: HyperfluxStorage[TermName, ValDef, Tree]
 
   override def newPhase(prev: nsc.Phase): StdPhase =
     new HyperfluxInterfaceAnalyzerPhase(prev)
@@ -23,78 +23,119 @@ abstract class HyperfluxInterfaceAnalyzerComponent extends PluginComponent {
     override def description =
       "gathers information and tells client from server parts"
     
-    override def apply(unit: CompilationUnit) {
-      println("actual unit root symbol: " + unit.body.symbol)
-      findAnnotations(unit.body)
-    }
-    
-    // TODO: find a way to get the class names type-safely at compile time
-    val CLIENT_CLASS_NAME = "hyperflux.annotation.Client"
-    val SERVER_CLASS_NAME = "hyperflux.annotation.Server"
-    var currentPackageID: RefTree = _
-    def findAnnotations(tree: Tree) {
-      tree match {
-        case PackageDef(pid, stats) => {
-          currentPackageID = pid
-          stats foreach findAnnotations
-        }
-        case ModuleDef(_, _, impl) => {
-          tree.symbol.annotations foreach {
-            _.atp.baseClasses foreach {
-              _.fullName match {
-                case CLIENT_CLASS_NAME =>
-                  hf.packageIDs += ((tree.symbol.safeOwner, currentPackageID))
-                  hf.clientObjects += impl.symbol.safeOwner
-                case SERVER_CLASS_NAME => {
-                  hf.packageIDs += ((tree.symbol.safeOwner, currentPackageID))
-                  hf.serverObjects += impl.symbol.safeOwner
-                  analyzeServerObject(impl)
-                }
-                case _ =>
-              }
-            }
-          }
-          // for now, we only allow those annotations on top-level objects
-          //impl.children foreach findAnnotations
-        }
-        case Import(_, _) => // imports can be skipped, no need to go deeper
-        // TODO: optimizations for several node types
-        case _ => //tree.children foreach findAnnotations
-      }
+    override def run() {
+      identifyCompilationTarget()
+      super.run()
     }
     
     /*
-    def debugTree(tree: Tree) {
-      println("__ debug info")
-      
-      def debugInt(tree: Tree, lvl: Int) {
-        println("  " * lvl + tree.symbol)
-        tree.children foreach { debugInt(_, lvl + 1) }
-      }
-      debugInt(tree, 0)
-    }*/
+     * In the first compiler phase, we need to identify whether we are
+     * currently compiling the client parts to JavaScript or the server
+     * parts to JVM bytecode
+     */
+    def identifyCompilationTarget() {
+      // probably not the most elegant test
+      hf.compilesToJS = 
+        currentSettings.plugin.value exists (_ contains "scalajs-compiler")
+      inform("Compilation target: " + (if (hf.compilesToJS) "JS" else "JVM"))
+    }
     
-    def analyzeServerObject(impl: Template) {
+    override def apply(unit: CompilationUnit) = findAnn(unit.body)
+    
+    val HF_SERVER_ANN = "Server"
+    val HF_CLIENT_ANN = "Client"
+    val HF_INTERFACE_ANN = "Interface"
+    def findAnn(t: Tree): Unit = t match {
+      case PackageDef(pid, stats) => stats foreach findAnn
+      case ModuleDef(Modifiers(_, _, anns), oName, impl) => {
+        anns find { 
+          case Apply(Select(New(tpt), _), args) => tpt.toString() match {
+            case HF_SERVER_ANN => {
+              if (args.size == 2 || args.size == 3) {
+                val argsSeq = args.toIndexedSeq
+                argsSeq(0) match {
+                  case Literal(Constant(url: String)) =>
+                    argsSeq(1) match {
+                      case Literal(Constant(port: Int)) =>
+                        hf.serverURL += ((oName, s"$url:$port"))
+                        hf.serverPort += ((oName, port))
+                      case _ => error(
+                        "second argument of @Server annotation must be an Int")
+                    }
+                  case _ => error(
+                      "first argument of @Server annotation must be a String")
+                }
+              } else {
+                error("wrong number of arguments for @Server annotation")
+              }
+              hf.serverObjects += oName
+              analyzeServerObject(oName, impl.body)
+              true
+            }
+            case HF_CLIENT_ANN => {
+              hf.clientObjects += oName 
+              true
+            }
+            case HF_INTERFACE_ANN => {
+              hf.interfaceObjects += oName
+              analyzeInterfaceObject(oName, impl.body)
+              true
+            }
+            case _ => false
+          }
+          case _ => false
+        }
+      }
+      case _ =>
+    }
+    
+    def analyzeServerObject(oName: TermName, ts: List[Tree]) {
       hf.serverMethods +=
-        ((impl.symbol.safeOwner, new HashMap[Symbol, DefDef]))
-      // for the sake of simplicity (and in order to enforce a clear design)
-      // only top-level method definitions in our server object are registered
-      // as remotely callable functions
-      impl.children foreach {
-        case d @ DefDef(mods, name, _, _, _, _)
+        ((oName, new HashMap[TermName, (List[List[ValDef]], Tree)]))
+      ts foreach {
+        case DefDef(mods, mName, _, pss, tpt, _)
         if (
           // private methods should of course not be exposed
           !(mods.hasAccessBoundary) &&
-          !(mods.hasFlag(PRIVATE)) &&
+          !(mods.isPrivate) &&
           // same for the constructor
-          !(name containsName "<init>") &&
+          mName != nme.CONSTRUCTOR &&
           // furthermore, we want to exclude methods that are mere accessors to
           // values and variables (this may be integrated later)
-          !(mods.hasFlag(ACCESSOR))
-        ) =>
-          hf.serverMethods(impl.symbol.safeOwner) += ((d.symbol, d))
-        case _ =>
+          !(mods.hasAccessorFlag)
+        ) => hf.serverMethods(oName) += ((mName, (pss, tpt)))
+        case _ => 
       }
     }
+    
+    val HF_PAGE_ANN = "Page"
+    val HF_ELEMENT_ANN = "Element"
+    def analyzeInterfaceObject(oName: TermName, ts: List[Tree]): Unit =
+      ts foreach (_ match {
+        case ValDef(Modifiers(_, _, anns), vName, _, rhs) => {
+          anns find { 
+            case Apply(Select(New(tpt), _), args) => tpt.toString match {
+              case HF_PAGE_ANN => {
+                val pageURL = if (
+                  (args.size == 0) ||
+                  (args.head.toString == "__HF_AUTO")
+                ) {
+                  vName.toString
+                } else {
+                  args.head.toString
+                }
+                hf.pages += (((oName, vName), pageURL))
+                true
+              }
+              case HF_ELEMENT_ANN => {
+                hf.elements += ((oName, vName))
+                true
+              }
+              case _ => false
+            }
+          }
+        }
+        case _ =>
+      })
   }
 }
