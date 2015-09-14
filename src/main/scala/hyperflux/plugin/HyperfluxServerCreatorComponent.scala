@@ -66,7 +66,44 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
     }
     
     // additional import required for the server components
-    val imports = List()
+    /*
+     * import hyperflux.routing_helpers._
+     * import org.http4s._
+     * import org.http4s.dsl._
+     * import org.http4s.headers._
+     * import org.http4s.MediaType._
+     * import org.http4s.server._
+     * import org.http4s.server.blaze._
+     */
+    lazy val hyperfluxName = newTermName("hyperflux")
+    lazy val orgHttp4sSelect = new Select(
+      new Ident(newTermName("org")), newTermName("http4s"))
+    lazy val orgHttp4sServerSelect = new Select(
+      orgHttp4sSelect, newTermName("server"))
+    val imports = List(
+      new Import(
+        new Select(new Ident(hyperfluxName), newTermName("routing_helpers")),
+        ImportSelector.wildList
+      ),
+      new Import(orgHttp4sSelect, ImportSelector.wildList),
+      new Import(
+        new Select(orgHttp4sSelect, newTermName("dsl")),
+        ImportSelector.wildList
+      ),
+      new Import(
+        new Select(orgHttp4sSelect, newTermName("headers")),
+        ImportSelector.wildList
+      ),
+      new Import(
+        new Select(orgHttp4sSelect, newTermName("MediaType")),
+        ImportSelector.wildList
+      ),
+      new Import(orgHttp4sServerSelect, ImportSelector.wildList),
+      new Import(
+        new Select(orgHttp4sServerSelect, newTermName("blaze")),
+        ImportSelector.wildList
+      )
+    )
     
     /**
      * Rewrites imports of the scalatags.JsDom object to the more
@@ -107,17 +144,14 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                 )
               ),
               EmptyTree,
-              new Block(
+              new Apply(
+                new Ident(newTermName("Ok")),
                 List(
-                  new ValDef(
-                    nullMods,
-                    retName,
-                    new TypeTree(),
-                    new Apply(new Ident(mName), List())
-                  ),
-                  retPickledVal
-                ),
-                okApply
+                  new Apply(
+                    new Select(upickleDefaultSelect, newTermName("write")),
+                    List(new Apply(new Ident(mName), List()))
+                  )
+                )
               )
             )
           } else if (mArgs.head.size == 1) {
@@ -140,33 +174,51 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                 )
               ),
               EmptyTree,
-              new Try(
-                new Block(
-                  List(
-                    new ValDef(
-                      nullMods,
-                      argName,
-                      new TypeTree(),
-                      new Apply(
-                        new TypeApply(
-                          readSelect,
-                          List(argType)
-                        ),
-                        List(reqBody)
+              new Apply(
+                new Select(
+                  new Apply(
+                    reqDecodeTypeApply,
+                    List(
+                      new Function(
+                        reqDataValList,
+                        new Block(
+                          List(
+                            new ValDef(
+                              nullMods,
+                              argName,
+                              new TypeTree(),
+                              new Apply(
+                                new TypeApply(
+                                  readSelect,
+                                  List(argType)
+                                ),
+                                List(reqDataIdent)
+                              )
+                            )
+                          ),
+                          new Apply(
+                            new Ident(newTermName("Ok")),
+                            List(
+                              new Apply(
+                                new Select(upickleDefaultSelect, newTermName("write")),
+                                List(
+                                  new Apply(new Ident(mName), List(new Ident(argName)))
+                                )
+                              )
+                            )
+                          )
+                        )
                       )
-                    ),
-                    new ValDef(
-                      nullMods,
-                      retName,
-                      new TypeTree(),
-                      new Apply(new Ident(mName), List(new Ident(argName)))
-                    ),
-                    retPickledVal
+                    )
                   ),
-                  okApply
+                  newTermName("handleWith")
                 ),
-                reqCatches,
-                EmptyTree
+                List(
+                  new Match(
+                    EmptyTree,
+                    reqCatches
+                  )
+                )
               )
             )
           } else {
@@ -195,47 +247,61 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                 )
               ),
               EmptyTree,
-              new Try(
-                new Block(
-                  List(
-                    new ValDef(
-                      nullMods,
-                      tupName,
-                      new TypeTree(),
-                      new Apply(
-                        new TypeApply(
-                          readSelect,
+              new Apply(
+                new Select(
+                  new Apply(
+                    reqDecodeTypeApply,
+                    List(
+                      new Function(
+                        reqDataValList,
+                        new Block(
                           List(
-                            new AppliedTypeTree(
-                              new Select(scalaIdent, newTypeName(s"Tuple${argTypes.size}")),
-                              argTypes
+                            new ValDef(
+                              nullMods,
+                              tupName,
+                              new TypeTree(),
+                              new Apply(
+                                new TypeApply(
+                                  readSelect,
+                                  List(
+                                    new AppliedTypeTree(
+                                      new Select(scalaIdent, newTypeName(s"Tuple${argTypes.size}")),
+                                      argTypes
+                                    )
+                                  )
+                                ),
+                                List(reqDataIdent)
+                              )
+                            )
+                          ) ++ (for (i <- 1 to argNames.size)
+                            yield new ValDef(
+                              nullMods,
+                              argNames(i-1),
+                              new TypeTree(),
+                              new Select(new Ident(tupName), newTermName(s"_$i"))
+                            )
+                          ).toList,
+                          new Apply(
+                            new Ident(newTermName("Ok")),
+                            List(
+                              new Apply(
+                                new Select(upickleDefaultSelect, newTermName("write")),
+                                List(new Apply(new Ident(mName), argIdents))
+                              )
                             )
                           )
-                        ),
-                        List(reqBody)
+                        )
                       )
                     )
-                  ) ++ (for (i <- 1 to argNames.size)
-                    yield new ValDef(
-                      nullMods,
-                      argNames(i-1),
-                      new TypeTree(),
-                      new Select(new Ident(tupName), newTermName(s"_$i"))
-                    )
-                  ).toList ++
-                  List(
-                    new ValDef(
-                      nullMods,
-                      retName,
-                      new TypeTree(),
-                      new Apply(new Ident(mName), argIdents)
-                    ),
-                    retPickledVal
                   ),
-                  okApply
+                  newTermName("handleWith")
                 ),
-                reqCatches,
-                EmptyTree
+                List(
+                  new Match(
+                    EmptyTree,
+                    reqCatches
+                  )
+                )
               )
             )
           }
@@ -319,21 +385,30 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                   new Apply(
                     new Select(
                       new Apply(
-                        blazeBuilderBindHttp,
-                        List(new Literal(new Constant(hf.serverPort(m.name))))
+                        new Select(
+                          new Apply(
+                            blazeBuilderBindHttp,
+                            List(new Literal(new Constant(hf.serverPort(m.name))))
+                          ),
+                          mountServiceName
+                        ),
+                        List(
+                          new Ident(getHTMLServiceName(m.name)),
+                          new Literal(new Constant(""))
+                        )
                       ),
                       mountServiceName
                     ),
                     List(
-                      new Ident(getHTMLServiceName(m.name)),
-                      new Literal(new Constant(""))
-                    )
+                      new Ident(getRPCServiceName(m.name)),
+                      new Literal(new Constant(s"/${m.name}")))
                   ),
                   mountServiceName
                 ),
                 List(
-                  new Ident(newTermName("service")),//getRPCServiceName(m.name)),
-                  new Literal(new Constant(m.name.toString)))
+                  new Ident(newTermName("jsService")),
+                  new Literal(new Constant("/js"))
+                )
               ),
               newTermName("run")
             ),
@@ -388,9 +463,16 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
     lazy val rootIdent = new Ident(newTermName("Root"))
     lazy val reqName = newTermName("req")
     lazy val tupName = newTermName("tup")
-    
-    // TODO:
-    lazy val reqBody = new Literal(new Constant(""))
+    lazy val reqDataName = newTermName("reqData")
+    lazy val reqDataIdent = new Ident(reqDataName)
+    lazy val reqDataValList = List(
+      new ValDef(
+        nullMods,
+        reqDataName,
+        new TypeTree(),
+        EmptyTree
+      )
+    )
     
     lazy val argName = newTermName("arg")
     lazy val upickleDefaultSelect = new Select(
@@ -398,20 +480,6 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
       newTermName("default")
     )
     lazy val readSelect = new Select(upickleDefaultSelect, newTermName("read"))
-    lazy val retName = newTermName("ret")
-    lazy val retPickledName = newTermName("retPickled")
-    lazy val retPickledVal = new ValDef(
-      nullMods,
-      retPickledName,
-      new TypeTree(),
-      new Ident(retName)
-      /*new Apply(
-        new Select(upickleDefaultSelect, newTermName("write")),
-        List(new Ident(retName))
-      )*/
-    )
-    lazy val okApply = new Apply(
-      new Ident(newTermName("Ok")), List(new Ident(retPickledName)))
     lazy val reqCatches = List(
       new CaseDef(
         new Typed(
@@ -421,7 +489,7 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
         EmptyTree,
         new Apply(
           new Ident(newTermName("BadRequest")),
-          List(new Literal(new Constant("")))
+          List(new Literal(new Constant("Bad request.")))
         )
       ),
       new CaseDef(
@@ -432,17 +500,38 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
         EmptyTree,
         new Apply(
           new Ident(newTermName("InternalServerError")),
-          List(new Literal(new Constant("")))
+          List(new Literal(new Constant("Internal error.")))
         )
       )
     )
     lazy val htmlDataName = newTermName("htmlData")
     lazy val okPage = new Apply(
-      new Ident(newTermName("Ok")), List(new Ident(htmlDataName)))
+      new Select(
+        new Apply(new Ident(newTermName("Ok")), List(new Ident(htmlDataName))),
+        newTermName("withContentType")
+      ),
+      List(
+        new Apply(
+          new Ident(newTermName("Some")),
+          List(
+            new Apply(
+              new Ident(newTermName("Content$minusType")),
+              List(new Ident(newTermName("text$divhtml")))
+            )
+          )
+        )
+      )
+    )
+        
+    lazy val reqDecodeTypeApply = new TypeApply(
+      new Select(new Ident(reqName), newTermName("decode")),
+      List(new Ident(newTypeName("String")))
+    )
     
     /**
      * Prepares interface definitions for JVM compilation by replacing calls
-     * to Scala-defined client methods by their export names for JavaScript
+     * to Scala-defined client methods by their export names for JavaScript,
+     * and giving IDs to all @Element annotated elements
      */
     def rewriteInterfaceObject(t: Template): Template = {
       
@@ -506,6 +595,84 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
           )
         case ModuleDef(Modifiers(flags, pw, ann), name, impl) =>
           new ModuleDef(new Modifiers(flags, pw, rts(ann)), name, rt(impl))
+        
+        // give IDs to explicit elements
+        case ValDef(Modifiers(flags, pw, ann), name, tpt, rhs)
+        if (ann exists {
+          case Apply(Select(New(tpt), _), args) => tpt.toString == "Element"
+          case _ => false
+        }) => {
+          new ValDef(
+              new Modifiers(flags, pw, rts(ann)),
+              name,
+              rt(tpt),
+              rhs match {
+                case Select(a, mName)
+                if (mName.toString == "render") => {
+                  a match {
+                    // two argument lists used
+                    case Apply(Apply(fun, args1), args2) => {
+                      new Apply(
+                        new Apply(
+                          rt(fun),
+                          rts(args1) ++ List(
+                            new Apply(
+                              new Select(
+                                new Ident(newTermName("id")),
+                                newTermName("$colon$eq")
+                              ),
+                              List(new Literal(new Constant(name.toString)))
+                            )
+                          )
+                        ),
+                        rts(args2)
+                      )
+                    }
+                    // one argument list used
+                    case Apply(fun, args) => {
+                      if (args exists (_.toString contains "$colon$eq")) {
+                        // the argument list used is the first one
+                        new Apply(
+                          rt(fun),
+                          rts(args) ++ List(
+                            new Apply(
+                              new Select(
+                                new Ident(newTermName("id")),
+                                newTermName("$colon$eq")
+                              ),
+                              List(new Literal(new Constant(name.toString)))
+                            )
+                          )
+                        )
+                      } else {
+                        // the argument list used is the second one
+                        new Apply(
+                          new Apply(
+                            rt(fun),
+                            List(
+                              new Apply(
+                                new Select(
+                                  new Ident(newTermName("id")),
+                                  newTermName("$colon$eq")
+                                ),
+                                List(new Literal(new Constant(name.toString)))
+                              )
+                            )
+                          ),
+                          rts(args)
+                        )
+                      }
+                    }
+                    case _ => rt(rhs)
+                  }
+                }
+                case _ => rt(rhs)
+              }
+          )
+        }
+        
+        // *****************************
+          
         case ValDef(Modifiers(flags, pw, ann), name, tpt, rhs) =>
           new ValDef(
               new Modifiers(flags, pw, rts(ann)),

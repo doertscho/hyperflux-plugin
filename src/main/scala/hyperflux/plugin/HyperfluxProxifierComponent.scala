@@ -3,7 +3,6 @@ package hyperflux.plugin
 import scala.tools.nsc
 import scala.tools.nsc._
 import scala.tools.nsc.plugins._
-import hyperflux.annotation._
 import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
 import scala.collection.mutable.MutableList
@@ -31,9 +30,6 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       if (!(hf.compilesToJS)) {
         return
       }
-      
-      inform(hf.clientObjects.toString)
-      inform(hf.methodUsages.toString)
       
       createProxyDefPrototypes()
       super.run()
@@ -143,31 +139,29 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
           }
         }
       }
-      
-      def createProxyMethodName(oName: TermName, mName: TermName): TermName = 
-        newTermName(s"HF_PROXY__${oName}__$mName")
-      
-      def createProxyDataName(oName: TermName, mName: TermName): TypeName = 
-        newTypeName(s"${createProxyMethodName(oName, mName)}__DATA")
-      
-      // some constant names that will be used in every proxy method
-      lazy val readTermName = newTermName("read")
-      lazy val writeTermName = newTermName("write")
-      lazy val callServerTermName = newTermName("callServer")
-      lazy val initTermName = newTermName("<init>")
-      lazy val dataTermName = newTermName("data")
-      lazy val retTermName = newTermName("ret")
-      lazy val strTermName = newTermName("str")
-      lazy val scalaTermName = newTermName("scala")
-      lazy val productTypeName = newTypeName("Product")
-      lazy val serializableTypeName = newTypeName("Serializable")
-      lazy val emptyTypeName = newTypeName("")
-      lazy val nullMods = new Modifiers(NoFlags, tpnme.EMPTY, Nil)
-      lazy val caseClassMods = new Modifiers(CASE, tpnme.EMPTY, Nil)
-      lazy val ccParamMods = new Modifiers(
-          PARAMACCESSOR | CASEACCESSOR, tpnme.EMPTY, Nil)
-      lazy val scalaIdent = new Ident(scalaTermName)
     }
+      
+    val HF_PROXY_PREFIX = "HF_PROXY__"
+    def createProxyMethodName(oName: TermName, mName: TermName): TermName = 
+      newTermName(s"$HF_PROXY_PREFIX${oName}__$mName")
+      
+    // some constant names that will be used in every proxy method
+    lazy val readTermName = newTermName("read")
+    lazy val writeTermName = newTermName("write")
+    lazy val callServerTermName = newTermName("callServer")
+    lazy val initTermName = newTermName("<init>")
+    lazy val dataTermName = newTermName("data")
+    lazy val retTermName = newTermName("ret")
+    lazy val strTermName = newTermName("str")
+    lazy val scalaTermName = newTermName("scala")
+    lazy val productTypeName = newTypeName("Product")
+    lazy val serializableTypeName = newTypeName("Serializable")
+    lazy val emptyTypeName = newTypeName("")
+    lazy val nullMods = new Modifiers(NoFlags, tpnme.EMPTY, Nil)
+    lazy val caseClassMods = new Modifiers(CASE, tpnme.EMPTY, Nil)
+    lazy val ccParamMods = new Modifiers(
+        PARAMACCESSOR | CASEACCESSOR, tpnme.EMPTY, Nil)
+    lazy val scalaIdent = new Ident(scalaTermName)
     
     lazy val hyperfluxName = newTermName("hyperflux")
     lazy val importHfProtocol = new Import(
@@ -208,6 +202,12 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       
       inform(s"Rewriting client object ${m.name}")
       
+      val newMeths = new HashSet[Tree]
+      var mainMissing = true
+      
+      /**
+       * Replaces server method calls by the corresponding proxy method
+       */
       def rt[T <: Tree](tree: T): T = (tree match {
         // TermTree types:
         case Block(stats, expr) => new Block(rts(stats), rt(expr))
@@ -229,7 +229,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         
         // the essential part happens here:
         case Apply(fun, args) => {
-          new Apply(fun match {
+          val rFun = fun match {
             case Select(Ident(oName), mName)
             if (
               hf.proxyDefs contains ((oName.toTermName, mName.toTermName))
@@ -237,8 +237,8 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
               new Ident(hf.proxyAliases((oName.toTermName, mName.toTermName)))
             }
             case _ => rt(fun)
-          },
-          rts(args))
+          }
+          new Apply(rFun, rts(args))
         }
         // *******************
         
@@ -263,35 +263,42 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         case PackageDef(pid, stats) => new PackageDef(rt(pid), rts(stats))
         case ClassDef(Modifiers(flags, pw, ann), name, tparams, impl) =>
           new ClassDef(
-              new Modifiers(flags, pw, rts(ann)),
-              name,
-              rts(tparams),
-              rt(impl)
+            new Modifiers(flags, pw, rts(ann)),
+            name,
+            rts(tparams),
+            rt(impl)
           )
         case ModuleDef(Modifiers(flags, pw, ann), name, impl) =>
           new ModuleDef(new Modifiers(flags, pw, rts(ann)), name, rt(impl))
         case ValDef(Modifiers(flags, pw, ann), name, tpt, rhs) =>
-          new ValDef(
+          async(
+            new ValDef(
               new Modifiers(flags, pw, rts(ann)),
               name,
               rt(tpt),
               rt(rhs)
+            )
           )
-        case DefDef(Modifiers(flags, pw, ann), name, tps, vpss, tpt, rhs) =>
-          new DefDef(
-              new Modifiers(flags, pw, rts(ann)),
+        case c @ DefDef(_, name, _, _, _, _) if (name == nme.CONSTRUCTOR) => c
+        case DefDef(Modifiers(flags, pw, ann), name, tps, vpss, tpt, rhs) => {
+          if (name.toString == "main") mainMissing = false
+          async(
+            new DefDef(
+              new Modifiers(flags, pw, addExport(name, rts(ann))),
               name,
               rts(tps),
               vpss map rts,
               rt(tpt),
               rt(rhs)
+            )
           )
+        }
         case TypeDef(Modifiers(flags, pw, ann), name, tps, rhs) =>
           new TypeDef(
-              new Modifiers(flags, pw, rts(ann)),
-              name, 
-              rts(tps),
-              rt(rhs)
+            new Modifiers(flags, pw, rts(ann)),
+            name, 
+            rts(tps),
+            rt(rhs)
           )
         case LabelDef(name, params, rhs) =>
           new LabelDef(name, rts(params), rt(rhs))
@@ -306,8 +313,155 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         case CaseDef(pat, guard, body) =>
           new CaseDef(rt(pat), rt(guard), rt(body))
         case Annotated(ann, arg) => new Annotated(rt(ann), rt(arg))
+        case _ => {
+          warning(s"don't know the type of $tree")
+          new Literal(new Constant("<error>"))
+        }
       }).asInstanceOf[T]
       def rts[T <: Tree](ts: List[T]): List[T] = ts map rt
+      
+      /**
+       * Adds an @JSExport annotation to methods such that they are callable
+       * by their Scala name in the final JavaScript file
+       */
+      def addExport(name: Name, ann: List[Tree]): List[Tree] = {
+        if (ann exists {
+          case Apply(Select(New(Ident(tpe)), nme.CONSTRUCTOR), _) =>
+            tpe.toString == "JSExport"
+          case _ => false
+        }) {
+          ann
+        } else {
+          new Apply(
+            new Select(
+              new New(new Ident(newTypeName("JSExport"))),
+              nme.CONSTRUCTOR
+            ),
+            List(new Literal(new Constant(name.toString)))
+          ) :: ann
+        }
+      }
+      
+      
+      /**
+       * Tries to "async" methods if necessary
+       */
+      def async[D <: ValOrDefDef](d: D): D = {
+        // first of all, check whether there is a proxy call in this one
+        // (as always, might be tested more elegantly ..)
+        if (d.rhs.toString contains HF_PROXY_PREFIX) {
+          
+          inform(s"Asyncing ${d.name}")
+          
+          var valID = 0
+          var funID = 0
+          def getNewValName() = {
+            valID = valID + 1
+            newTermName(s"v_${d.name}_$valID")
+          }
+          def getNewFunName() = {
+            funID = funID + 1
+            newTermName(s"f_${d.name}_$funID")
+          }
+          
+          def a(t: Tree): Tree = t match {
+            
+            case Apply(fun, args)
+            // rewrite is only necessary if the proxy call is in the arguments 
+            if (args.toString contains HF_PROXY_PREFIX) => {
+              val (wo, w) = args span { a =>
+                !(a.toString contains HF_PROXY_PREFIX) }
+              val valName = getNewValName()
+              new Apply(
+                new Select(a(w.head), newTermName("onSuccess")),
+                List(
+                  new Match(
+                    EmptyTree,
+                    List(
+                      new CaseDef(
+                        new Bind(valName, wildCardIdent),
+                        EmptyTree,
+                        a(
+                          new Apply(
+                            fun,
+                            wo ++ List(new Ident(valName)) ++ w.tail
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            }
+            
+            case b @ Block(es, e)
+            if (b.toString contains HF_PROXY_PREFIX) => {
+              // identify the point to split the sequence
+              val (wo, w) = (es ++ List(e)) span { t =>
+                !(t.toString contains HF_PROXY_PREFIX) }
+              
+              w.head match {
+                // flattened form: create a new method with the rest of the
+                // sequence and execute it on success
+                case ValDef(mods, name, tpt, Apply(fun, args))
+                if (fun.toString contains HF_PROXY_PREFIX) => {
+                  
+                  new Block(
+                    wo,
+                    if (w.size == 1) {
+                      new Apply(fun, args)
+                    } else {
+                      new Apply(
+                        new Select(new Apply(fun, args), newTermName("onSuccess")),
+                        List(
+                          new Match(
+                            EmptyTree,
+                            List(
+                              new CaseDef(
+                                new Bind(name, wildCardIdent),
+                                EmptyTree,
+                                a(
+                                  if (w.tail.size == 1) {
+                                    w.last
+                                  } else {
+                                    new Block(
+                                      w.tail.dropRight(1),
+                                      w.last
+                                    )
+                                  }
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    }
+                  )
+                  
+                }
+                
+                // fallback: return input
+                case _ => new Block(es, e)
+              }
+            }
+            
+            case _ => t
+          }
+          
+          (d match {
+            case ValDef(mods, name, tpt, rhs) =>
+              new ValDef(mods, name, tpt, a(rhs))
+            case DefDef(mods, name, tps, vpss, tpt, rhs) =>
+              new DefDef(mods, name, tps, vpss, tpt, a(rhs))
+          }).asInstanceOf[D]
+          
+        } else {
+          d
+        }
+      }
+      
+      lazy val wildCardIdent = new Ident(nme.WILDCARD)
+      
       
       val usedProxyDefs = (hf.proxyDefs filter {
         case (k, _) => hf.methodUsages(m.name) contains k
@@ -322,13 +476,30 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
           (m.impl.parents filterNot { _.toString() contains "AnyRef" })
       }
       
+      
+      val rewrittenBody = rts(m.impl.body)
+      if (mainMissing) {
+        newMeths += new DefDef(
+          nullMods,
+          newTermName("main"),
+          List(),
+          List(List()),
+          new Select(scalaIdent, newTypeName("Unit")),
+          new Literal(new Constant(()))
+        )
+      }
+      
       new ModuleDef(
-        m.mods,
+        new Modifiers(
+          m.mods.flags,
+          m.mods.privateWithin,
+          addExport(m.name, m.mods.annotations)
+        ),
         m.name,
         new Template(
           parents,
           m.impl.self,
-          rts(m.impl.body) ++ usedProxyDefs
+          rewrittenBody ++ newMeths ++ usedProxyDefs
         )
       )
     }
