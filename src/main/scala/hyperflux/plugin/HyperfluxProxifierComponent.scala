@@ -168,6 +168,14 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         new Select(new Ident(hyperfluxName), newTermName("protocol_helpers")),
         ImportSelector.wildList
     )
+    lazy val importHfJsDom = new Import(
+        new Ident(hyperfluxName),
+        List(
+          new ImportSelector(
+            newTermName("js_dom"), -1, newTermName("js_dom"), -1
+          )
+        )
+    )
     lazy val importUPickle = new Import(
         new Select(new Ident(newTermName("upickle")), newTermName("default")),
         ImportSelector.wildList
@@ -179,7 +187,16 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       ),
       ImportSelector.wildList
     )
-    lazy val imports = List(importHfProtocol, importJSApp, importUPickle)
+    lazy val imports = List(
+      importHfProtocol, importJSApp, importHfJsDom, importUPickle)
+    
+    lazy val jsDocGetElemSelect = new Select(
+      new Select(
+        new Ident(newTermName("js_dom")),
+        newTermName("document")
+      ),
+      newTermName("getElementById")
+    )
     
     def rewrite(t: Tree): Tree = t match {
       case PackageDef(pid, stats) => new PackageDef(
@@ -197,6 +214,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
      * This method replaces all occurrences of server methods
      * by the corresponding proxy method and tries to "asynchronize"
      * the control flow.
+     * Also replaces references to named elements by native JS access
      */
     def rewriteClientObject(m: ModuleDef): ModuleDef = {
       
@@ -256,7 +274,18 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
           new ExistentialTypeTree(rt(tpt), rts(wheres))
         case tt: TypeTree => tt
         // SymTree types:
+        
+        // replace element references:
+        case Select(Ident(oName), eName)
+        if (hf.elements contains ((oName.toTermName, eName.toTermName))) =>
+          new Apply(
+            jsDocGetElemSelect,
+            List(new Literal(new Constant(eName.toString)))
+          )
+          
         case Select(qual, name) => new Select(rt(qual), name)
+        // ***************************
+        
         case Ident(name) => new Ident(name)
         case SelectFromTypeTree(qual, name) =>
           new SelectFromTypeTree(rt(qual), name)

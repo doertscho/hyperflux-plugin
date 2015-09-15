@@ -387,27 +387,37 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                       new Apply(
                         new Select(
                           new Apply(
-                            blazeBuilderBindHttp,
-                            List(new Literal(new Constant(hf.serverPort(m.name))))
+                            new Select(
+                              new Apply(
+                                blazeBuilderBindHttp,
+                                List(new Literal(new Constant(hf.serverPort(m.name))))
+                              ),
+                              mountServiceName
+                            ),
+                            List(
+                              new Ident(getHTMLServiceName(m.name)),
+                              new Literal(new Constant(""))
+                            )
                           ),
                           mountServiceName
                         ),
                         List(
-                          new Ident(getHTMLServiceName(m.name)),
-                          new Literal(new Constant(""))
+                          new Ident(getRPCServiceName(m.name)),
+                          new Literal(new Constant(s"/${m.name}"))
                         )
                       ),
                       mountServiceName
                     ),
                     List(
-                      new Ident(getRPCServiceName(m.name)),
-                      new Literal(new Constant(s"/${m.name}")))
+                      new Ident(newTermName("jsService")),
+                      new Literal(new Constant("/js"))
+                    )
                   ),
                   mountServiceName
                 ),
                 List(
-                  new Ident(newTermName("jsService")),
-                  new Literal(new Constant("/js"))
+                  new Ident(newTermName("staticService")),
+                  new Literal(new Constant("/static"))
                 )
               ),
               newTermName("run")
