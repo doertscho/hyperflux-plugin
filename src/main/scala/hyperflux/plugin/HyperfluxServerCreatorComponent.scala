@@ -132,14 +132,18 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
             
             // PARAMETERLESS METHOD
             
+            val reqName = getNewReqName()
             new CaseDef(
-              new Apply(
-                mgIdent,
-                List(
-                  postIdent,
-                  new Apply(
-                    divIdent,
-                    List(rootIdent, new Literal(new Constant(mName.toString)))
+              new Bind(
+                reqName,
+                new Apply(
+                  mgIdent,
+                  List(
+                    postIdent,
+                    new Apply(
+                      divIdent,
+                      List(rootIdent, new Literal(new Constant(mName.toString)))
+                    )
                   )
                 )
               ),
@@ -149,7 +153,14 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                 List(
                   new Apply(
                     new Select(upickleDefaultSelect, newTermName("write")),
-                    List(new Apply(new Ident(mName), List()))
+                    List(
+                      new Apply(
+                        new Apply(
+                          new Ident(mName), List()
+                        ),
+                        List(new Ident(reqName))
+                      )
+                    )
                   )
                 )
               )
@@ -158,7 +169,8 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
             
             // SINGLE PARAMETER METHOD
             
-            val argType = mArgs.head.head.tpt            
+            val argType = mArgs.head.head.tpt
+            val reqName = getNewReqName()
             new CaseDef(
               new Bind(
                 reqName,
@@ -177,32 +189,33 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
               new Apply(
                 new Select(
                   new Apply(
-                    reqDecodeTypeApply,
+                    new TypeApply(
+                      new Select(new Ident(reqName), newTermName("decode")),
+                      List(new Ident(newTypeName("String")))
+                    ),
                     List(
                       new Function(
                         reqDataValList,
-                        new Block(
+                        new Apply(
+                          new Ident(newTermName("Ok")),
                           List(
-                            new ValDef(
-                              nullMods,
-                              argName,
-                              new TypeTree(),
-                              new Apply(
-                                new TypeApply(
-                                  readSelect,
-                                  List(argType)
-                                ),
-                                List(reqDataIdent)
-                              )
-                            )
-                          ),
-                          new Apply(
-                            new Ident(newTermName("Ok")),
-                            List(
-                              new Apply(
-                                new Select(upickleDefaultSelect, newTermName("write")),
-                                List(
-                                  new Apply(new Ident(mName), List(new Ident(argName)))
+                            new Apply(
+                              new Select(upickleDefaultSelect, newTermName("write")),
+                              List(
+                                new Apply(
+                                  new Apply(
+                                    new Ident(mName),
+                                    List(
+                                      new Apply(
+                                        new TypeApply(
+                                          readSelect,
+                                          List(argType)
+                                        ),
+                                        List(reqDataIdent)
+                                      )
+                                    )
+                                  ),
+                                  List(new Ident(reqName))
                                 )
                               )
                             )
@@ -226,11 +239,8 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
             // MULTIPLE PARAMETER METHOD
             
             // TODO: maybe someday support multiple parameter lists
-            val argNames = (for (i <- 1 to mArgs.head.size)
-              yield newTermName(s"arg$i")
-            ).toList
-            val argIdents = argNames map { n => new Ident(n) }
             val argTypes = mArgs.head map (_.tpt)
+            val reqName = getNewReqName()
             
             new CaseDef(
               new Bind(
@@ -250,7 +260,10 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
               new Apply(
                 new Select(
                   new Apply(
-                    reqDecodeTypeApply,
+                    new TypeApply(
+                      new Select(new Ident(reqName), newTermName("decode")),
+                      List(new Ident(newTypeName("String")))
+                    ),
                     List(
                       new Function(
                         reqDataValList,
@@ -273,20 +286,30 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
                                 List(reqDataIdent)
                               )
                             )
-                          ) ++ (for (i <- 1 to argNames.size)
-                            yield new ValDef(
-                              nullMods,
-                              argNames(i-1),
-                              new TypeTree(),
-                              new Select(new Ident(tupName), newTermName(s"_$i"))
-                            )
-                          ).toList,
+                          ),
                           new Apply(
                             new Ident(newTermName("Ok")),
                             List(
                               new Apply(
-                                new Select(upickleDefaultSelect, newTermName("write")),
-                                List(new Apply(new Ident(mName), argIdents))
+                                new Select(
+                                  upickleDefaultSelect,
+                                  newTermName("write")
+                                ),
+                                List(
+                                  new Apply(
+                                    new Apply(
+                                      new Ident(mName),
+                                      (for (i <- 1 to argTypes.size)
+                                        yield
+                                          new Select(
+                                            new Ident(tupName),
+                                            newTermName(s"_$i")
+                                          )
+                                      ).toList
+                                    ),
+                                    List(new Ident(reqName))
+                                  )
+                                )
                               )
                             )
                           )
@@ -339,19 +362,30 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
             )
           ),
           EmptyTree,
-          new Block(
+          new Apply(
+            new Select(
+              new Apply(
+                new Ident(newTermName("Ok")),
+                List(
+                  new Select(
+                    new Select(new Ident(oName), vName),
+                    newTermName("toString")
+                  )
+                )
+              ),
+              newTermName("withContentType")
+            ),
             List(
-              new ValDef(
-                nullMods,
-                htmlDataName,
-                new TypeTree(),
-                new Select(
-                  new Select(new Ident(oName), vName),
-                  newTermName("toString")
+              new Apply(
+                new Ident(newTermName("Some")),
+                List(
+                  new Apply(
+                    new Ident(newTermName("Content$minusType")),
+                    List(new Ident(newTermName("text$divhtml")))
+                  )
                 )
               )
-            ),
-            okPage
+            )
           )
         )
       }
@@ -428,13 +462,35 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
         )
       )
       
+      def addImplicitReq(ts: List[Tree]): List[Tree] = ts map {
+        case DefDef(mods, name, tps, vpss, tpt, rhs)
+        if (name != nme.CONSTRUCTOR) => {
+          val reqParam = new ValDef(
+            new Modifiers(PARAM | IMPLICIT, tpnme.EMPTY, List()),
+            newTermName("hfImpReq"),
+            new Ident(newTypeName("Request")),
+            EmptyTree
+          )
+          new DefDef(
+            mods,
+            name,
+            tps,
+            vpss ++ List(List(reqParam)),
+            tpt,
+            rhs
+          )
+        }
+        case t => t
+      }
+      
       new ModuleDef(
         m.mods,
         m.name,
         new Template(
           m.impl.parents,
           m.impl.self,
-          m.impl.body ++ List(rpcService, htmlService, mainMethod)
+          addImplicitReq(m.impl.body) ++
+            List(rpcService, htmlService, mainMethod)
         )
       )
     }
@@ -471,9 +527,17 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
     lazy val getIdent = new Ident(newTermName("GET"))
     lazy val divIdent = new Ident(newTermName("$div"))
     lazy val rootIdent = new Ident(newTermName("Root"))
-    lazy val reqName = newTermName("req")
+    
+    // unfortunately, this workaround is necessary
+    // (due to a bug in the icode phase?)
+    var reqNum = 0
+    def getNewReqName() = {
+      reqNum = reqNum + 1
+      newTermName(s"httpReqObj$reqNum")
+    }
+    
     lazy val tupName = newTermName("tup")
-    lazy val reqDataName = newTermName("reqData")
+    lazy val reqDataName = newTermName("httpReqData")
     lazy val reqDataIdent = new Ident(reqDataName)
     lazy val reqDataValList = List(
       new ValDef(
@@ -531,11 +595,6 @@ abstract class HyperfluxServerCreatorComponent extends PluginComponent {
           )
         )
       )
-    )
-        
-    lazy val reqDecodeTypeApply = new TypeApply(
-      new Select(new Ident(reqName), newTermName("decode")),
-      List(new Ident(newTypeName("String")))
     )
     
     /**

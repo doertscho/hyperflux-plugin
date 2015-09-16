@@ -34,5 +34,5 @@ class HyperfluxStorage[TermName, ValDef, Tree] {
    * Interface pages
    */
   val pages = new HashMap[(TermName, TermName), String]
-  val elements = new HashSet[(TermName, TermName)]
+  val elements = new HashMap[(TermName, TermName), TermName]
 }

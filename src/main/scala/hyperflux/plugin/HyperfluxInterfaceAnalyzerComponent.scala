@@ -128,7 +128,13 @@ abstract class HyperfluxInterfaceAnalyzerComponent extends PluginComponent {
                 true
               }
               case HF_ELEMENT_ANN => {
-                hf.elements += ((oName, vName))
+                rhs match {
+                  case Select(Apply(Ident(eFun), _), selM)
+                  if (selM.toString == "render") =>
+                    hf.elements += (((oName, vName), eFun.toTermName))
+                  case _ =>
+                    hf.elements += (((oName, vName), newTermName("???")))
+                }
                 true
               }
               case _ => false

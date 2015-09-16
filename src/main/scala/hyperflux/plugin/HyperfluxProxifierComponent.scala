@@ -7,6 +7,7 @@ import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
 import scala.collection.mutable.MutableList
 import scala.reflect.internal.Flags._
+import scalatags.JsDom.all
 
 abstract class HyperfluxProxifierComponent extends PluginComponent {
 
@@ -40,6 +41,20 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
     }
     
     def createProxyDefPrototypes() {
+      
+      // another workaround that is necessary due to confusions that the NSC
+      // seems to have when generating anonymous classes
+      var dataNum = 0
+      def getNewDataName() = {
+        dataNum = dataNum + 1
+        newTermName(s"data$dataNum")
+      }
+      var retNum = 0
+      def getNewRetName() = {
+        retNum = retNum + 1
+        newTermName(s"ret$retNum")
+      }
+      
       val usedMethods = hf.methodUsages.values.flatten.toSet
       hf.serverMethods foreach { case (oName, meths) =>
         meths foreach { case (mName, (paramss, tpe)) =>
@@ -63,7 +78,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
             val methBody = new MutableList[Tree]
             
             // create data tuple if necessary
-            if (argNames.size > 0) {
+            if (argNames.size > 1) {
               methBody += new ValDef(
                 nullMods,
                 dataTermName,
@@ -79,6 +94,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
               )
             }
             
+            val retTermName = getNewRetName()
             // the call to the central server proxy method
             methBody += new ValDef(
               nullMods,
@@ -93,10 +109,15 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
                   new Literal(new Constant(hf.serverURL(oName))),
                   new Literal(new Constant(oName.toString())),
                   new Literal(new Constant(mName.toString())),
-                  if (argNames.size > 0) {
+                  if (argNames.size > 1) {
                     new Apply(
                       new Ident(writeTermName),
                       List(new Ident(dataTermName))
+                    )
+                  } else if (argNames.size == 1) {
+                    new Apply(
+                      new Ident(writeTermName),
+                      List(argNames.head)
                     )
                   } else {
                     new Literal(new Constant(""))
@@ -105,10 +126,11 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
               )
             )
             
+            val dataName = getNewDataName()
             // the extraction of the result
             val extract = new Apply(
               new TypeApply(new Ident(readTermName), List(tpe)),
-              List(new Ident(strTermName))
+              List(new Ident(dataName))
             )
             // the Future mapping
             val mapping = new Apply(
@@ -118,7 +140,13 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
                   EmptyTree,
                   List(
                     new CaseDef(
-                      new Bind(strTermName, new Ident(nme.WILDCARD)),
+                      new Bind(
+                        dataName,
+                        new Typed(
+                          new Ident(nme.WILDCARD.toTermName),
+                          new Ident(newTypeName("String"))
+                        )
+                      ),
                       EmptyTree,
                       extract
                     )
@@ -141,18 +169,26 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       }
     }
       
-    val HF_PROXY_PREFIX = "HF_PROXY__"
+    val HF_PROXY_PREFIX = "HF_PROXY___"
     def createProxyMethodName(oName: TermName, mName: TermName): TermName = 
-      newTermName(s"$HF_PROXY_PREFIX${oName}__$mName")
-      
+      newTermName(s"$HF_PROXY_PREFIX${oName}___$mName")
+    def unApplyProxyName(pName: TermName): (TermName, TermName) = {
+      val p = pName.toString.drop(HF_PROXY_PREFIX.length()).toString
+      val parts = p.split("___")
+      if (parts.size == 2) {
+        (newTermName(parts(0)), newTermName(parts(1)))
+      } else {
+        error(s"unable to unapply proxy name $pName")
+        (newTermName(""), newTermName(""))
+      }
+    }
+
     // some constant names that will be used in every proxy method
     lazy val readTermName = newTermName("read")
     lazy val writeTermName = newTermName("write")
     lazy val callServerTermName = newTermName("callServer")
     lazy val initTermName = newTermName("<init>")
     lazy val dataTermName = newTermName("data")
-    lazy val retTermName = newTermName("ret")
-    lazy val strTermName = newTermName("str")
     lazy val scalaTermName = newTermName("scala")
     lazy val productTypeName = newTypeName("Product")
     lazy val serializableTypeName = newTypeName("Serializable")
@@ -162,6 +198,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
     lazy val ccParamMods = new Modifiers(
         PARAMACCESSOR | CASEACCESSOR, tpnme.EMPTY, Nil)
     lazy val scalaIdent = new Ident(scalaTermName)
+    lazy val unitTpt = TypeTree(definitions.UnitTpe)
     
     lazy val hyperfluxName = newTermName("hyperflux")
     lazy val importHfProtocol = new Import(
@@ -180,6 +217,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         new Select(new Ident(newTermName("upickle")), newTermName("default")),
         ImportSelector.wildList
     )
+    // import scala.scalajs.js._
     lazy val importJSApp = new Import(
       new Select(
         new Select(new Ident(newTermName("scala")), newTermName("scalajs")),
@@ -187,25 +225,84 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       ),
       ImportSelector.wildList
     )
-    lazy val imports = List(
-      importHfProtocol, importJSApp, importHfJsDom, importUPickle)
-    
-    lazy val jsDocGetElemSelect = new Select(
+    // import scala.scalajs.js.annotation._
+    lazy val importJSAnn = new Import(
       new Select(
-        new Ident(newTermName("js_dom")),
-        newTermName("document")
+        new Select(
+          new Select(new Ident(newTermName("scala")), newTermName("scalajs")),
+          newTermName("js")
+        ),
+        newTermName("annotation")
       ),
+      ImportSelector.wildList
+    )
+    // import scala.concurrent.ExecutionContext.Implicits.global
+    lazy val scalaConcSelect =
+      new Select(scalaIdent, newTermName("concurrent"))
+    lazy val importScalaConc = new Import(
+      scalaConcSelect,
+      ImportSelector.wildList
+    )
+    lazy val importScalaConcECISelect = new Import(
+      new Select(
+        new Select(scalaConcSelect, newTermName("ExecutionContext")),
+        newTermName("Implicits")
+      ),
+      List(
+        new ImportSelector(
+          newTermName("global"), -1, newTermName("global"), -1
+        )
+      )
+    )
+    // import scala.util.{Success, Failure}
+    lazy val scalaUtilSelect = new Select(scalaIdent, newTermName("util"))
+    lazy val importSuccess = new Import(
+      scalaUtilSelect,
+      List(
+        new ImportSelector(
+          newTermName("Success"), -1, newTermName("Success"), -1
+        )
+      )
+    )
+    lazy val importFailure = new Import(
+      scalaUtilSelect,
+      List(
+        new ImportSelector(
+          newTermName("Failure"), -1, newTermName("Failure"), -1
+        )
+      )
+    )
+    
+    lazy val imports = List(
+      importHfProtocol,
+      importJSApp,
+      importJSAnn,
+      importHfJsDom,
+      importUPickle,
+      importScalaConc,
+      importScalaConcECISelect,
+      importSuccess,
+      importFailure
+    )
+    
+    lazy val jsDomIdent = new Ident(newTermName("js_dom"))
+    lazy val jsDocGetElemSelect = new Select(
+      new Select(jsDomIdent, newTermName("document")),
       newTermName("getElementById")
     )
+    lazy val jsDocLocSelect = new Select(jsDomIdent, newTermName("location"))
     
     def rewrite(t: Tree): Tree = t match {
       case PackageDef(pid, stats) => new PackageDef(
-          pid, imports ++ (stats map rewrite))
+        pid,
+        imports ++
+          ((stats filterNot {
+            case ModuleDef(_, name, _) => hf.serverObjects contains name
+            case _ => false
+          }) map rewrite)
+      )
       case m @ ModuleDef(mods, name, impl)
-      if (
-        (hf.clientObjects contains name) &&
-        !(hf.methodUsages(name).isEmpty)
-      ) => rewriteClientObject(m)
+      if (hf.clientObjects contains name) => rewriteClientObject(m)
       // anything else on this level should not be transformed
       case e => e
     }
@@ -245,6 +342,20 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         case Typed(expr, tpt) => new Typed(rt(expr), rt(tpt))
         case TypeApply(fun, args) => new TypeApply(rt(fun), rts(args))
         
+        // replace redirects
+        case Apply(Ident(mName), List(Select(Ident(oName), pName)))
+        if (
+          (mName.toString == "redirect") &&
+          (hf.pages contains ((oName.toTermName, pName.toTermName)))
+        ) => {
+          new Assign(
+            jsDocLocSelect,
+            new Literal(
+              new Constant(hf.pages((oName.toTermName, pName.toTermName)))
+            )
+          )
+        }          
+        
         // the essential part happens here:
         case Apply(fun, args) => {
           val rFun = fun match {
@@ -277,11 +388,28 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
         
         // replace element references:
         case Select(Ident(oName), eName)
-        if (hf.elements contains ((oName.toTermName, eName.toTermName))) =>
-          new Apply(
-            jsDocGetElemSelect,
-            List(new Literal(new Constant(eName.toString)))
-          )
+        if (hf.elements contains ((oName.toTermName, eName.toTermName))) => {
+          
+          val eFun = hf.elements((oName.toTermName, eName.toTermName))
+          if (eFun.toString == "???") {
+            // fallback: lookup element without conversion
+            new Apply(
+              jsDocGetElemSelect,
+              List(new Literal(new Constant(eName.toString)))
+            )
+          } else {
+            new TypeApply(
+              new Select(
+                new Apply(
+                  jsDocGetElemSelect,
+                  List(new Literal(new Constant(eName.toString)))
+                ),
+                newTermName("asInstanceOf")
+              ),
+              List(getElementType(eFun))
+            )
+          }
+        }
           
         case Select(qual, name) => new Select(rt(qual), name)
         // ***************************
@@ -401,6 +529,7 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
               val (wo, w) = args span { a =>
                 !(a.toString contains HF_PROXY_PREFIX) }
               val valName = getNewValName()
+              
               new Apply(
                 new Select(a(w.head), newTermName("onSuccess")),
                 List(
@@ -408,7 +537,22 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
                     EmptyTree,
                     List(
                       new CaseDef(
-                        new Bind(valName, wildCardIdent),
+                        new Bind(
+                          valName,
+                          w.head match {
+                            case Apply(Ident(pName), args) => {
+                              val (objName, methName) = unApplyProxyName(pName.toTermName)
+                              if (
+                                (hf.serverMethods contains objName) &&
+                                (hf.serverMethods(objName) contains methName)
+                              ) {
+                                val retType = hf.serverMethods(objName)(methName)._2
+                                new Typed(new Ident(nme.WILDCARD.toTermName), retType)
+                              } else EmptyTree
+                            }
+                            case _ => EmptyTree
+                          }
+                        ),
                         EmptyTree,
                         a(
                           new Apply(
@@ -423,31 +567,251 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
               )
             }
             
-            case b @ Block(es, e)
-            if (b.toString contains HF_PROXY_PREFIX) => {
-              // identify the point to split the sequence
-              val (wo, w) = (es ++ List(e)) span { t =>
-                !(t.toString contains HF_PROXY_PREFIX) }
+            // yes, tailored for the ChatApp, I admit
+            case If(Apply(Ident(fun), args), thenP, elseP)
+            if (fun.toString contains HF_PROXY_PREFIX) => {
               
-              w.head match {
-                // flattened form: create a new method with the rest of the
-                // sequence and execute it on success
-                case ValDef(mods, name, tpt, Apply(fun, args))
-                if (fun.toString contains HF_PROXY_PREFIX) => {
+              val valName = getNewValName()
+              new Apply(
+                new Select(
+                  new Apply(new Ident(fun), args),
+                  newTermName("onSuccess")
+                ),
+                List(
+                  new Match(
+                    EmptyTree,
+                    List(
+                      new CaseDef(
+                        new Bind(
+                          valName,
+                          new Typed(
+                            new Ident(nme.WILDCARD.toTermName),
+                            new Ident(newTypeName("Boolean"))
+                          )
+                        ),
+                        EmptyTree,
+                        new If(
+                          new Ident(valName),
+                          a(thenP),
+                          a(elseP)
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            }
+            
+            // labels of this structure indicate some kind of loop, usually
+            // whiles. they have to be replaced by a helper method.
+            // (again pretty much tailored probably)
+            case LabelDef(name, ps, If(cond, thenP, Literal(_))) => {
+              if (cond.toString contains HF_PROXY_PREFIX) {
+                cond match {
                   
-                  new Block(
-                    wo,
-                    if (w.size == 1) {
-                      new Apply(fun, args)
-                    } else {
+                  case Apply(Ident(mName), args)
+                  if (mName.toString contains HF_PROXY_PREFIX) => {
+                    
+                    /*
+                     * Something like
+                     * while (PROXY_OP()) {
+                     *   op1
+                     *   |
+                     *   opN
+                     * }
+                     * 
+                     * has to be transformed into:
+                     * 
+                     * def whileFun1() {
+                     *   PROXY_OP() onSuccess {
+                     *     if (result) {
+                     *       async({
+                     *         op1
+                     *         |
+                     *         opN
+                     *         whileFun1()
+                     *       })
+                     *     }
+                     *   }
+                     * }
+                     */
+                    val funName = getNewFunName()
+                    val valName = getNewValName()
+                                        
+                    val dd = new DefDef(
+                      nullMods,
+                      funName,
+                      List(),
+                      List(List()),
+                      unitTpt,
                       new Apply(
-                        new Select(new Apply(fun, args), newTermName("onSuccess")),
+                        new Select(
+                          new Apply(new Ident(mName), args),
+                          newTermName("onSuccess")
+                        ),
                         List(
                           new Match(
                             EmptyTree,
                             List(
                               new CaseDef(
-                                new Bind(name, wildCardIdent),
+                                new Bind(
+                                  valName,
+                                  new Typed(
+                                    new Ident(nme.WILDCARD.toTermName),
+                                    new Ident(newTypeName("Boolean"))
+                                  )
+                                ),
+                                EmptyTree,
+                                new If(
+                                  new Ident(valName),
+                                  a(
+                                    flatten(
+                                      new Block(
+                                        List(thenP),
+                                        new Apply(new Ident(funName), List())
+                                      )
+                                    )
+                                  ),
+                                  EmptyTree
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                    
+                    new Block(
+                      List(dd),
+                      new Apply(new Ident(funName), List())
+                    )
+                  }
+                  
+                  // fallback
+                  case _ => t
+                }
+              } else if (thenP.toString contains HF_PROXY_PREFIX) {
+                
+                /*
+                 * Something like this:
+                 * while (local_cond()) {
+                 *   local_op1
+                 *   |
+                 *   local_opM
+                 *   PROXY_OP
+                 *   opM+1
+                 *   |
+                 *   opN
+                 * }
+                 * 
+                 * has to be transformed into:
+                 * def whileFun1() {
+                 *   if (local_cond()) {
+                 *     local_op1
+                 *     |
+                 *     local_opM
+                 *     PROXY_OP onSuccess {
+                 *       async({
+                 *         opM+1
+                 *         |
+                 *         opN
+                 *         whileFun1()
+                 *       })
+                 *     }
+                 *   }
+                 * }
+                 * whileFun1()
+                 */
+                val funName = getNewFunName()
+                val valName = getNewValName()
+                
+                val (wo, w) = thenP match {
+                  // the then path of such while loops is usually a block at
+                  // the end of which the starting label is called, so this
+                  // should actually match all cases and erase that call
+                  // (at least for while loops, might be very different for
+                  // do-whiles and so)
+                  case b @ Block(es, e) => flatten(b).stats span { e =>
+                    !(e.toString contains HF_PROXY_PREFIX) }
+                  case _ => ((List(), List(thenP)))
+                }
+                
+                val dd = new DefDef(
+                  nullMods,
+                  funName,
+                  List(),
+                  List(List()),
+                  unitTpt,
+                  new If(
+                    cond,
+                    flatten(
+                      new Block(
+                        wo,
+                        a(
+                          flatten(
+                            new Block(
+                              w,
+                              new Apply(new Ident(funName), List())
+                            )
+                          )
+                        )
+                      )
+                    ),
+                    EmptyTree
+                  )
+                )
+                    
+                new Block(
+                  List(dd),
+                  new Apply(new Ident(funName), List())
+                )
+                
+              } else t
+            }
+            
+            case b @ Block(es, e)
+            if (b.toString contains HF_PROXY_PREFIX) => {
+              
+              val fb = flatten(b)
+              
+              // identify the point to split the sequence
+              val (wo, w) = (fb.stats ++ List(fb.expr)) span { t =>
+                !(t.toString contains HF_PROXY_PREFIX) }
+              
+              w.head match {
+                // flattened form: create a new method with the rest of the
+                // sequence and execute it on success
+                case ValDef(mods, name, tpt, Apply(Ident(fun), args))
+                if (fun.toString contains HF_PROXY_PREFIX) => {
+                                
+                  new Block(
+                    wo,
+                    if (w.size == 1) {
+                      new Apply(new Ident(fun), args)
+                    } else {
+                      new Apply(
+                        new Select(
+                          new Apply(new Ident(fun), args),
+                          newTermName("onSuccess")
+                        ),
+                        List(
+                          new Match(
+                            EmptyTree,
+                            List(
+                              new CaseDef(
+                                new Bind(
+                                  name,
+                                  {
+                                    val (objName, methName) = unApplyProxyName(fun.toTermName)
+                                    if (
+                                      (hf.serverMethods contains objName) &&
+                                      (hf.serverMethods(objName) contains methName)
+                                    ) {
+                                      val retType = hf.serverMethods(objName)(methName)._2
+                                      new Typed(new Ident(nme.WILDCARD.toTermName), retType)
+                                    } else EmptyTree
+                                  }
+                                ),
                                 EmptyTree,
                                 a(
                                   if (w.tail.size == 1) {
@@ -466,7 +830,66 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
                       )
                     }
                   )
+                }
+                
+                // very similar to the ValDef case
+                case Assign(Ident(varName), Apply(Ident(fun), args))
+                if (fun.toString contains HF_PROXY_PREFIX) => {
+                                
+                  val retValName = getNewValName()
+                  val newAssign = new Assign(
+                    new Ident(varName),
+                    new Ident(retValName)
+                  )
                   
+                  new Block(
+                    wo,
+                    new Apply(
+                      new Select(
+                        new Apply(new Ident(fun), args),
+                        newTermName("onSuccess")
+                      ),
+                      List(
+                        new Match(
+                          EmptyTree,
+                          List(
+                            new CaseDef(
+                              new Bind(
+                                retValName,
+                                {
+                                  val (objName, methName) = unApplyProxyName(fun.toTermName)
+                                  if (
+                                    (hf.serverMethods contains objName) &&
+                                    (hf.serverMethods(objName) contains methName)
+                                  ) {
+                                    val retType = hf.serverMethods(objName)(methName)._2
+                                    new Typed(new Ident(nme.WILDCARD.toTermName), retType)
+                                  } else EmptyTree
+                                }
+                              ),
+                              EmptyTree,
+                              a(
+                                if (w.size == 1) {
+                                  newAssign
+                                } else {
+                                  new Block(
+                                    List(newAssign) ++ w.tail.dropRight(1),
+                                    w.last
+                                  )
+                                }
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                }
+                
+                // if the expression with the proxy call is the last expr
+                // in the block, try to process it recursively
+                case x if (w.size == 1) => {
+                  flatten(new Block(wo, a(x)))
                 }
                 
                 // fallback: return input
@@ -488,8 +911,6 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
           d
         }
       }
-      
-      lazy val wildCardIdent = new Ident(nme.WILDCARD)
       
       
       val usedProxyDefs = (hf.proxyDefs filter {
@@ -533,4 +954,161 @@ abstract class HyperfluxProxifierComponent extends PluginComponent {
       )
     }
   }
+  
+  /**
+   * it might be necessary (and harmless) to flatten the block,
+   * that means to turn something like
+   * 
+   * block {
+   *   doA()
+   *   block {
+   *     doB()
+   *     doC()
+   *     doD()
+   *   }
+   *   doE()
+   *   dof()
+   * }
+   * 
+   * into 
+   * 
+   * block {
+   *   doA()
+   *   doB()
+   *   doC()
+   *   doD()
+   *   doE()
+   *   doF()
+   * }
+   */
+  def flatten(bl: Block): Block = {
+    val stats = new MutableList[Tree]
+    bl.stats foreach (_ match {
+      case ib: Block => {
+        val fib = flatten(ib)
+        stats ++= fib.stats
+        stats += fib.expr
+      }
+      case x => stats += x
+    })
+    val expr = bl.expr match {
+      case ib: Block => {
+        val fib = flatten(ib)
+        stats ++= fib.stats
+        fib.expr
+      }
+      case x => x
+    }
+    new Block(
+      stats.toList,
+      expr
+    )
+  }
+  
+  /**
+   * Unfortunately, this workaround is necessary because we are running this
+   * phase before the typer phase.
+   * (list adapted from the file scalatags/js/jsdom/Tags.scala)
+   */
+  def getElementType(f: TermName): Select =
+    new Select(
+      new Select(
+        new Select(
+          new Select(new Ident(newTermName("org")), newTermName("scalajs")),
+          newTermName("dom")
+        ),
+        newTermName("html")
+      ),
+      newTypeName(f.toString match {
+        // Root Element
+        case "html" => "Html"
+        // Document Metadata
+        case "head" => "Head"
+        case "base" => "Base"
+        case "link" => "Link"
+        case "meta" => "Meta"
+        // Scripting
+        case "script" => "Script"
+        // Sections
+        case "body" => "Body"
+        case "h1" => "Heading"
+        case "h2" => "Heading"
+        case "h3" => "Heading"
+        case "h4" => "Heading"
+        case "h5" => "Heading"
+        case "h6" => "Heading"
+        case "header" => "Element"
+        case "footer" => "Element"
+        // Grouping content
+        case "p" => "Paragraph"
+        case "hr" => "HR"
+        case "pre" => "Pre"
+        case "blockquote" => "Quote"
+        case "ol" => "OList"
+        case "ul" => "UList"
+        case "li" => "LI"
+        case "dl" => "DList"
+        case "dt" => "DT"
+        case "dd" => "DD"
+        case "figure" => "Element"
+        case "figcaption" => "Element"
+        case "div" => "Div"
+        // Text-level semantics
+        case "a" => "Anchor"
+        case "em" => "Element"
+        case "strong" => "Element"
+        case "small" => "Element"
+        case "s" => "Element"
+        case "cite" => "Element"
+        case "code" => "Element"
+        case "sub" => "Element"
+        case "sup" => "Element"
+        case "i" => "Element"
+        case "b" => "Element"
+        case "u" => "Element"
+        case "span" => "Span"
+        case "br" => "BR"
+        case "wbr" => "Element"
+        // Edits
+        case "ins" => "Mod"
+        case "del" => "Mod"
+        // Embedded content
+        case "img" => "Image"
+        case "iframe" => "IFrame"
+        case "embed" => "Embed"
+        case "object" => "Object"
+        case "param" => "Param"
+        case "video" => "Video"
+        case "audio" => "Audio"
+        case "source" => "Source"
+        case "track" => "Track"
+        case "canvas" => "Canvas"
+        case "map" => "Map"
+        case "area" => "Area"
+        // Tabular data
+        case "table" => "Table"
+        case "caption" => "TableCaption"
+        case "colgroup" => "TableCol"
+        case "col" => "TableCol"
+        case "tbody" => "TableSection"
+        case "thead" => "TableSection"
+        case "tfoot" => "TableSection"
+        case "tr" => "TableRow"
+        case "td" => "TableCell"
+        case "th" => "TableHeaderCell"
+        // Forms
+        case "form" => "Form"
+        case "fieldset" => "FieldSet"
+        case "legend" => "Legend"
+        case "label" => "Label"
+        case "input" => "Input"
+        case "button" => "Button"
+        case "select" => "Select"
+        case "datalist" => "DataList"
+        case "optgroup" => "OptGroup"
+        case "option" => "Option"
+        case "textarea" => "TextArea"
+        case _ => "???"
+      })
+    )
 }
